@@ -1,5 +1,9 @@
+CHANGES
 MANIFEST
-Makefile.PL
 README
-lib/Devel/PreProcessor.pm
+Makefile.PL
+PreProcessor.pm
 t/includes.t
+t/pragmas.t
+t/t1.pl
+t/t2.pl

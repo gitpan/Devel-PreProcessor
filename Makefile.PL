@@ -4,9 +4,8 @@ use ExtUtils::MakeMaker;
 WriteMakefile(
   NAME => "Devel::PreProcessor",
   DISTNAME => "Devel-PreProcessor",
-  VERSION_FROM => "lib/Devel/PreProcessor.pm",
+  VERSION_FROM => "PreProcessor.pm",
   PREREQ_PM => {},
-  # 'clean' => {FILES => '*/*/*~'},
   'dist' => {COMPRESS=>'gzip -9f', SUFFIX=>'gz'},
 );
 

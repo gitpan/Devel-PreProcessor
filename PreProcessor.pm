@@ -1,37 +1,10 @@
 #!/usr/local/bin/perl -s
 
-### Devel::PreProcessor - Module inlining and other Perl source manipulations
-
-### Copyright 1998, 1999 Evolution Online Systems, Inc.
-  # You may use this software for free under the terms of the Artistic License
-
-### To Do:
-  # - Create a real test suite.
-
-### Change History
-  # 1999-02-20 Fixed anoying "Argument ... isn't numeric" warning.
-  # 1999-02-08 Preserve the __DATA__ section from the outermost file.
-  # 1999-02-07 Incorporated AutoLoader support based on Del's implementation.
-  # 1999-02-05 Merged do_use, do_require, and new support for "no foo". -Simon
-  # 1999-02-04 For 5.005, add ".pm" to package name used in %INC. -Del
-  # 1998-11-01 Now using IO::File. Fixed POD =cut line for -Includes handling.
-  # 1998-09-19 Cleaned up format of POD documentation.
-  # 1998-09-08 Updated documentation to cover @INC overrides.
-  # 1998-06-30 Added comment about handling "no" statements.
-  # 1998-05-23 Added support for overriding @INC.
-  # 1998-03-24 Minor doc fixup.
-  # 1998-02-24 Removed leading whitespace from POD regexes (thanks Del)
-  # 1998-02-23 Changed regex for use statements to break at parenthesis.
-  # 1998-02-19 Moved general-purpose code to new Devel::PreProcessor package.
-  # 1998-02-19 Added $Conditionals mechanism.
-  # 1998-02-19 Added $INC{$module} to output to prevent run-time reloads.
-  # 1998-01-26 Modified to imports and eval in the same begin block. 
-  # 1998-01-20 Hacked ActiveWare source; changed pragma import calls -Simon
-
 package Devel::PreProcessor;
 
-$VERSION = 1999.0220;
+$VERSION = 2003.1128;
 
+use strict;
 use IO::File;
 
 # Option flags, defaulting to off
@@ -78,7 +51,7 @@ sub import {
 
 # If we're being run directly, expand the first file on the command line.
 unless ( caller ) {
-  $Includes ||= 1 || $main::Includes;
+  $Includes ||= $main::Includes;
   $Conditionals ||= $main::Conditionals;
   $StripComments ||= $main::StripComments;
   $StripBlankLines ||= $main::StripBlankLines;
@@ -105,12 +78,12 @@ sub parse_file {
     $line_number ++;
     
     # Handle use, no, and require statements
-    if ( $Includes and /^\s*(use|no)\s+([^\s\(\;]+)(?:\s*(\S.*))?;/ ) {
+    if ( $Includes and /^\s*(use|no)\s+([^\s\(\;]+)\b(?:\s*(\S.*))?;/ ) {
       my($mode, $mod_name, $import_list) = ( $1, $2, $3 );
       $module_info{'isa_AutoLoader'} = 1 if ($mod_name =~ /AutoLoader/);
       handle_include($mode, $mod_name, $import_list) or print $_;
       next LINE;
-    } elsif ( $Includes and /^\s*require\s+([^\$]+);/ ) {
+    } elsif ( $Includes and /^\s*require\s+([^\$]+?)\s*?;/ ) {
       my $mod_name = $1;
       $module_info{'isa_AutoLoader'} = 1 if ($mod_name =~ /AutoLoader/);
       handle_include( 'require', $mod_name, '' ) or print $_;
@@ -192,9 +165,9 @@ sub handle_include {
   }
   
   # Problems with scoping of use/no strict in single-file context
-  if ( $importer and $mod_name eq 'strict' ) {
-    return 1;	# do not include in output
-  }
+  # if ( $importer and $mod_name eq 'strict' ) {
+  #   return 1;	# do not include in output
+  # }
   
   # Manipulate library search path at preprocessor include time
   if ($mode eq 'use' and $mod_name eq 'lib') {
@@ -207,8 +180,10 @@ sub handle_include {
   
   # Convert package name to partial file name
   my $mod_file = $mod_name;
-  $mod_file =~ s#::#/#g;
-  $mod_file .= '.pm' unless ( $mod_file =~ /['"]/ || $mod_file =~ /\.pm$/i ); 
+  unless ( $mod_file =~ s/^(['"])(.*)\1\Z/$2/ ) {
+    $mod_file =~ s#::#/#g;
+    $mod_file .= '.pm';
+  }
   
   my $mod_path;
   if ( $psuedo_INC{ $mod_file } ) {
@@ -232,7 +207,9 @@ sub handle_include {
     print "### Start of inlined library $mod_name.\n" if $ShowFileBoundaries;
     
     print "\$INC{'$mod_file'} = '$mod_path';\n";
-    print "{\n"; # this block was formerly framed with an eval
+    print "{\n"; 
+    print "  BEGIN { strict::unimport('strict') }\n" 
+	if ( exists $psuedo_INC{'strict.pm'} and $mod_file ne 'strict.pm' );
     parse_file($mod_path);
     print "\n};\n";
     
@@ -246,9 +223,7 @@ sub handle_include {
     } else {
       print $mod_name . '->' . $importer . "($import_list);\n";
     }
-  }
-  
-  if ( $importer ) {
+    
     # end BEGIN block
     print "}\n";
   }
@@ -401,9 +376,26 @@ a shell with the following options
     -StripBlankLines foo.pl | wc -l
 
 
-=head1 BUGS AND CAVEATS
+=head1 BUGS AND SUPPORT
+
+=head2 Release Status
+
+This is a maintenance release of Devel::PreProcessor. 
+
+This module has been tested in several environments and no major
+problems have been discovered, but those tests have been somewhat
+limited and you are advised to try it in your environment to confirm
+it works as expected.
+
+=head2 Known Problems
 
 =over 4
+
+=item To Do: Improved Test Suite
+
+The current test suite is quite limited, and only addresses the
+Includes functionality. Additional tests that exercise the other
+capabilities would be nice.
 
 =item Compatibility: Includes
 
@@ -413,13 +405,6 @@ other than that on which it was built. This problem can be minimized
 by adjusting the search path to not include modules in the version- or
 architecture-specific library trees, but you will then need to ensure
 that those modules are available on the execution platform.
-
-=item Limitation: Pragmas
-
-While some pragmas are known to work, including use vars, problems may
-pop up with others. In particular, use strict and no strict pragmas are
-removed from the resulting source, because their scoping changes in a
-single-file context, usually with fatal results.
 
 =item Bug: Multi-line use statements not handled
 
@@ -436,57 +421,138 @@ There's not much we can do about XSub/SO/PLL files.
 
 =back
 
+=head2 Support
 
-=head1 PREREQUISITES AND INSTALLATION
+If you have questions or feedback about this module, please feel
+free to contact the author at the below address. Although there is
+no formal support program, I do attempt to answer email promptly. 
 
-This package should run on any standard Perl 5 installation.
+Bug reports that contain a failing test case are greatly appreciated,
+and suggested patches will be promptly considered for inclusion in
+future releases.
 
-You may retrieve this package from the below URL:
-  http://www.evoscript.com/dist/
+To report bugs via the CPAN web tracking system, go to 
+C<http://rt.cpan.org/NoAuth/Bugs.html?Dist=Devel-PreProcessor> or send mail 
+to C<Dist=Devel-PreProcessor#rt.cpan.org>, replacing C<#> with C<@>.
 
-To install this package, download and unpack the distribution archive,
-then:
+=head2 Community
 
-=over 4
+If you've found this module useful or have feedback about your
+experience with it, consider sharing your opinion with other Perl
+users by posting your comment to CPAN's ratings system:
 
-=item * C<perl Makefile.PL>
+=over 2
 
-=item * C<make test>
+=item *
 
-=item * C<make install>
+http://cpanratings.perl.org/rate/?distribution=Devel-PreProcessor
+
+=back
+
+For more general discussion, you may wish to post a message on PerlMonks or the comp.lang.perl.misc newsgroup:
+
+=over 2
+
+=item *
+
+http://www.perlmonks.org/index.pl?node=Seekers%20of%20Perl%20Wisdom
+
+=item *
+
+http://groups.google.com/groups?group=comp.lang.perl.misc
 
 =back
 
 
-=head1 STATUS AND SUPPORT
+=head1 DISTRIBUTION AND INSTALLATION
 
-This release of Devel::PreProcessor is intended primarily for public
-review and feedback, but is stable enough for production use. It has been
-tested in several environments and no major problems have been discovered,
-but it should be considered "beta" pending further feedback.
+=head2 Version
 
-  Name            DSLI  Description
-  --------------  ----  ---------------------------------------------
+This is Devel::PreProcessor version 2003.1128.
+
+This module's CPAN registration should read:
+
+  Name            DSLIP  Description
+  --------------  -----  ---------------------------------------------
   Devel::
-  ::PreProcessor  bdpf  Module inlining and other Perl source manipulations
+  ::PreProcessor  rdpfp  Module inlining and other Perl source manipulations
 
-Further information and support for this module is available at
-E<lt>www.evoscript.comE<gt>.
+=head2 Prerequisites
 
-Please report bugs or other problems to E<lt>bugs@evoscript.comE<gt>.
+In general, this module should work with Perl 5.003 or later,
+without requring any modules beyond the core Perl distribution.
 
+=head2 Installation
 
-=head1 AUTHORS AND COPYRIGHT
+You should be able to install this module using the CPAN shell interface:
 
-Copyright 1998, 1999 Evolution Online Systems, Inc. E<lt>www.evolution.comE<gt>
+  perl -MCPAN -e 'install Devel::PreProcessor'
 
-You may use this software for free under the terms of the Artistic License.
+Alternately, you may retrieve this package from CPAN or from the author's site:
 
-Contributors: M. Simon Cavalletto E<lt>simonm@evolution.comE<gt> and
-Del Merritt E<lt>dmerritt@intranetics.comE<gt>, with Win32 debugging
-assistance from Randy Roy.
+=over 2
+
+=item *
+
+http://search.cpan.org/~evo/
+
+=item *
+
+http://www.cpan.org/modules/by-authors/id/E/EV/EVO
+
+=item *
+
+http://www.evoscript.org/Devel-PreProcessor/dist/
+
+=back
+
+After downloading the distribution, follow the normal procedure to unpack and install it, using the commands shown below or their local equivalents on your system:
+
+  tar -xzf Devel-PreProcessor-*.tar.gz
+  cd Devel-PreProcessor-*
+  perl Makefile.PL
+  make test && sudo make install
+
+=head2 Tested Platforms
+
+This release has been tested succesfully on the following platforms:
+
+  5.6.1 on darwin
+
+You may also review the current test results from CPAN-Testers:
+
+=over 2
+
+=item *
+
+http://testers.cpan.org/show/Devel-PreProcessor.html
+
+=back
+
+=head1 CREDITS AND COPYRIGHT
+
+=head2 Developed By
+
+Developed by Matthew Simon Cavalletto at Evolution Softworks. 
+You may contact the author directly at C<simonm@cavalletto.org>.
+More free Perl software is available at C<www.evoscript.org>.
+
+=head2 Contributors 
+
+  Del Merritt
+  Randy Roy, Win32 debugging assistance
+
+=head2 Copyright
+
+Copyright 2003 Matthew Cavalletto. 
+
+Portions copyright 1998, 1999 Evolution Online Systems, Inc.
 
 Derived from filter.pl, as provided by ActiveWare
-E<lt>www.activestate.comE<gt>
+E<lt>www.activestate.comE<gt>.
+
+=head2 License
+
+You may use, modify, and distribute this software under the same terms as Perl.
 
 =cut  
