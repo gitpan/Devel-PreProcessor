@@ -1,9 +1,9 @@
-# Devel::PreProcessor -- 1998.0919
+# Devel::PreProcessor -- 1999.0220
 
 Name            DSLI  Description
 --------------  ----  ---------------------------------------------
 Devel::
-::PreProcessor  adpf  Module inlining and other Perl source manipulations
+::PreProcessor  bdpf  Module inlining and other Perl source manipulations
 
 This package processes Perl source files and outputs a modified version acording to several user-setable options, as follows:
 
@@ -13,11 +13,12 @@ If the StripPods flag is activated, Devel::PreProcessor will not include POD doc
 
 If the Conditionals flag is activated, Devel::PreProcessor will utilize a simple conditional inclusion scheme. Lines begining with "#__CONDITIONAL__ if ..." will have the remainder of the line evaluated as a Perl expression; unless the result is true, the following lines will be omitted until a line containing "#__CONDITIONAL__ endif"
 
-This release of Devel::PreProcessor is intended for public review and feedback. 
-It has been tested in several environments and no major problems have been 
-discovered, but it should be considered "alpha" pending that feedback.
+This release of Devel::PreProcessor is intended primarily for public
+review and feedback, but is stable enough for production use. It has been
+tested in several environments and no major problems have been discovered,
+but it should be considered "beta" pending further feedback.
 
-To install this package, download and unpack the distribution archive from http://www.evoscript.com/dist/Devel-PreProcessor-1998.0919.tar.gz and execute the standard "perl Makefile.PL", "make test", "make install" sequence.
+To install this package, download and unpack the distribution archive from http://www.evoscript.com/dist/Devel-PreProcessor-1999.0220.tar.gz and execute the standard "perl Makefile.PL", "make test", "make install" sequence.
   
 ---
 Copyright 1998 Evolution Online Systems, Inc.

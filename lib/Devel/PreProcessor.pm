@@ -9,6 +9,10 @@
   # - Create a real test suite.
 
 ### Change History
+  # 1999-02-20 Fixed anoying "Argument ... isn't numeric" warning.
+  # 1999-02-08 Preserve the __DATA__ section from the outermost file.
+  # 1999-02-07 Incorporated AutoLoader support based on Del's implementation.
+  # 1999-02-05 Merged do_use, do_require, and new support for "no foo". -Simon
   # 1999-02-04 For 5.005, add ".pm" to package name used in %INC. -Del
   # 1998-11-01 Now using IO::File. Fixed POD =cut line for -Includes handling.
   # 1998-09-19 Cleaned up format of POD documentation.
@@ -26,12 +30,24 @@
 
 package Devel::PreProcessor;
 
-$VERSION = 1999.0204;
+$VERSION = 1999.0220;
+
+use IO::File;
 
 # Option flags, defaulting to off
 use vars qw( $Includes $Conditionals $StripComments $StripPods $ShowFileBoundaries $StripBlankLines );
 
-use IO::File;
+# %psuedo_INC - hash of filenames included so far
+# @psuedo_INC - directories to search for modules
+use vars qw( %psuedo_INC @psuedo_INC );
+
+# %Importers - maps file inclusion keywords to their import methods
+use vars qw( %Importers );
+%Importers = (
+  'require' => '',
+  'use' => 'import',
+  'no' => 'unimport',
+);
 
 # Devel::PreProcessor->import( 'StripPods', 'Conditionals', ... );
 sub import {
@@ -57,6 +73,9 @@ sub import {
   }
 }
 
+@psuedo_INC = @INC;
+%psuedo_INC = ();
+
 # If we're being run directly, expand the first file on the command line.
 unless ( caller ) {
   $Includes ||= 1 || $main::Includes;
@@ -66,165 +85,189 @@ unless ( caller ) {
   $StripPods ||= $main::StripPods;
   $ShowFileBoundaries ||= $main::ShowFileBoundaries;
   my $source = shift @ARGV;
-  @INC = @ARGV if ( scalar @ARGV );
-  parse_file($source);
+  if ( scalar @ARGV ) {
+    @psuedo_INC = @ARGV;
+ }
+  parse_file( $source, 'outermost_file'=>1 );
 }
 
 ### File Processing
 
-# parse_file( $filename );
+# parse_file( $filename, %options );
 sub parse_file {
   my $filename = shift;
-  
   my $fh = IO::File->new($filename);
-  my $line_number;
   
-  LINE: while(<$fh>) {
+  my $line_number = 0;
+  my %module_info = @_;
+  
+  LINE: while( defined ($_ = $fh->getline) ) {
     $line_number ++;
     
-    if ( $line_number < 2 and /^\#\!/ ){
-      print $_;  			# don't discard the shbang line
+    # Handle use, no, and require statements
+    if ( $Includes and /^\s*(use|no)\s+([^\s\(\;]+)(?:\s*(\S.*))?;/ ) {
+      my($mode, $mod_name, $import_list) = ( $1, $2, $3 );
+      $module_info{'isa_AutoLoader'} = 1 if ($mod_name =~ /AutoLoader/);
+      handle_include($mode, $mod_name, $import_list) or print $_;
       next LINE;
-    } 
-      
-    elsif ( $StripPods and /^=(pod|head[12])/i ){
-      do { ++ $line_number; } 
-	  while ( <$fh> !~ /^=cut/i );  # discard everything up to '=cut'
-      next LINE;
-    }    
-    elsif ( /^=(pod|head[12])/i ){
-      do { print $_; ++ $line_number; $_ = <$fh> } 
-	  while ( $_ !~ /^=cut/i );  	# include everything up to '=cut'
-      print $_;
-      next LINE;
-    }
-    
-    elsif ( $Includes and /^\s*use\s+([^\s\(]+)(?:\s*(\S.*))?;/ ) {
-      my( $module, $import ) = ( $1, $2 );
-      do_use($module, $import) or print $_;
     } elsif ( $Includes and /^\s*require\s+([^\$]+);/ ) {
-      my $module = $1;
-      do_require( $module ) or print $_;
-    } elsif ( $Includes and /^\s*__(END|DATA)__/ ){
-      last LINE;			    # discard the rest of the file
-    }
-    
-    elsif ( $StripBlankLines and /^\s*$/){
-      next LINE;			    # skip whitespace only lines
-    }
-    
-    elsif ( $StripComments and /^\s*\#/){
-      next LINE;			    # skip full-line comments
-    }
-    
-    elsif ( $Conditionals and /^\s*#__CONDITIONAL__ if (.*)/i ) {
-      my $rc = eval "package main;\n" . $1;
-      unless ( $rc and ! $@ ) {	    # if expr isn't true, skip to end
-	do { ++ $line_number; print "\n"; } 
-	    while ( <$fh> !~ /^\s*\#__CONDITIONAL__ endif/i );
-      }
-    } elsif ( $Conditionals and /^\s*\#__CONDITIONAL__ endif/i){
-      next LINE;			    # skip conditional end
-    } elsif ( $Conditionals and /^\s*\#__CONDITIONAL__  (.*)/i){
-      print $1;			            # remove conditional null branches
+      my $mod_name = $1;
+      $module_info{'isa_AutoLoader'} = 1 if ($mod_name =~ /AutoLoader/);
+      handle_include( 'require', $mod_name, '' ) or print $_;
       next LINE;
-    } else {
+    } elsif ( $Includes and /^__END__/ ){
+      next LINE if $module_info{'isa_AutoLoader'}; # parse unsplit source
+      last LINE;
+    } elsif ( $Includes and /^__DATA__/ ){
+      if ( $module_info{'outermost_file'} ) {
+	# blindly include everything up to end of file
+	do { print $_; ++ $line_number; $_ = $fh->getline } while (defined $_); 
+      } else {
+	# we're going to loose anything they might have in the __DATA__ handle
+	# warn "Unable to include __DATA__ contents.\n";
+      }
+      last LINE;
+    }
+    
+    # Handle embedded POD 
+    elsif ( /^=(pod|head[12])/i ){
+      if ( $StripPods ) {
+	do {++ $line_number; $_ = $fh->getline } 
+	    while ( $_ !~ /^=cut/i ); # discard everything up to '=cut'
+      } else {
+	do { print $_; ++ $line_number; $_ = $fh->getline } 
+	    while ( $_ !~ /^=cut/i ); # blindly include everything up to '=cut'
+	print $_;
+      }
+      next LINE;
+    }
+    
+    # Optionally exclude blank or whitespace-only lines
+    elsif ( $StripBlankLines and /^\s*$/){
+      next LINE;
+    }
+    
+    # Optionally exclude lines that begin with the comment character
+    elsif ( $StripComments and /^\s*\#/){
+      print $_ if ( $line_number < 2 and /^\#\!/ ); # never discard shbang line
+      next LINE;
+    }
+    
+    # Support a minimal conditional inclusion mechanism with Perl test syntax
+    elsif ( $Conditionals and /^\s*#__CONDITIONAL__\s?(.*)$/i ) {
+      my $conditional = $1;
+      if ( $conditional =~ s/^if //i ) {
+	my $rc = eval "package main;\n$conditional";
+	unless ( $rc and ! $@ ) {	    # if expr isn't true, skip to end
+	  do { print "\n"; ++ $line_number; $_ = $fh->getline } 
+	      while ( $_ !~ /^\s*\#__CONDITIONAL__ endif/i );
+	}
+      } elsif ( $conditional =~ /endif/i ){
+	next LINE;			    # skip conditional end
+      } else {
+	print $conditional;		    # remove conditional null branches
+	next LINE;
+      }
+    } 
+    
+    else {
       print $_;
     }
   }
 }
 
-# do_use( $module, $import_list );
-sub do_use {
-  my $module = shift;
-  my $imports = shift;
+# $handled_flag = handle_include( $mode, $mod_name, $import_list );
+sub handle_include {
+  my ( $mode, $mod_name, $import_list ) = @_;
   
-  return 1 if ($module eq 'strict');  # problems with scoping of strict
+  $import_list = '' unless defined $import_list;
+  my $importer = $Importers{ $mode };
+  # warn "    Include statement: $mode $mod_name ($import_list)\n";
   
-  if ($module eq 'lib') {
-    my @paths = eval "$imports";
-    push @INC, @paths unless $@;
-    return 0;
+  ## Special cases
+  
+  # Perl version requirements are not linked to a module file
+  if ( $mod_name =~ /^[\.\_\d]+/ ) {
+    return 0;	# include in output for check at exection time 
   }
   
-  my $filename = find_file_once( $module );
-  return if ( ! $filename ) ;
+  # Problems with scoping of use/no strict in single-file context
+  if ( $importer and $mod_name eq 'strict' ) {
+    return 1;	# do not include in output
+  }
   
-  print "BEGIN { \n";
+  # Manipulate library search path at preprocessor include time
+  if ($mode eq 'use' and $mod_name eq 'lib') {
+    my @paths = eval "$import_list";
+    push @psuedo_INC, @paths unless $@;
+    # return 1; # Perhaps we don't actually want this to happen at run-time?
+  }
   
-  do_include( $module, $filename ) unless ( $filename eq '-1' );
+  ## Locate file to be included
   
-  # Call import, but don't use the OOP notation for pragmas.
-  print $module, 
-  	( $module =~ /\A[a-z]+\Z/ ? "::import('$module', " : "->import(" ), 
-	( defined $imports ? $imports : '' ), ");\n";
+  # Convert package name to partial file name
+  my $mod_file = $mod_name;
+  $mod_file =~ s#::#/#g;
+  $mod_file .= '.pm' unless ( $mod_file =~ /['"]/ || $mod_file =~ /\.pm$/i ); 
   
-  print "}\n";
+  my $mod_path;
+  if ( $psuedo_INC{ $mod_file } ) {
+    # If we've already included this file, all we need to do is the import.
+    $mod_path = -1; 
+  } else {
+    $mod_path = $psuedo_INC{ $mod_file } = search_path( $mod_file );
+    return unless $mod_path; # not found -- leave in output for later use
+  }
+  
+  ## Generate output
+  
+  if ( $importer ) {
+    # use and no statements should be executed as soon as they're parsed
+    print "BEGIN { \n";
+  }
+  
+  if ( $mod_path and $mod_path ne '-1' ) {
+    warn "  Including $mod_path\n";
+    
+    print "### Start of inlined library $mod_name.\n" if $ShowFileBoundaries;
+    
+    print "\$INC{'$mod_file'} = '$mod_path';\n";
+    print "{\n"; # this block was formerly framed with an eval
+    parse_file($mod_path);
+    print "\n};\n";
+    
+    print "### End of inlined library $mod_name.\n" if $ShowFileBoundaries;
+  }
+  
+  # Call import or unimport, but don't use the OOP notation for pragma modules
+  if ( $importer ) {
+    if ( $mod_name =~ /\A[a-z]+\Z/ ) {
+      print $mod_name . '::' . $importer . "('$mod_name', $import_list);\n";
+    } else {
+      print $mod_name . '->' . $importer . "($import_list);\n";
+    }
+  }
+  
+  if ( $importer ) {
+    # end BEGIN block
+    print "}\n";
+  }
   
   return 1;
 }
 
-# do_require( $module );
-sub do_require {
-  my $module = shift;
-  
-  my $filename = find_file_once( $module );
-  return if ( ! $filename or $filename eq '-1' ) ;
-  do_include( $module, $filename );
-}
-
-# do_include( $module, $filename );
-sub do_include {
-  my $module = shift;
-  my $filename = shift;
-  
-  warn "  Including $filename\n";
-  
-  # For 5.005 compatibility, add .pm extension before setting up %INC 
-  $module .= '.pm' unless ( $module =~ /['"]/ || $module =~ /\.pm$/i ); 
-  
-  print "### Start of inlined library $module.\n" if $ShowFileBoundaries;
-  
-  print "\$INC{'$module'} = '$filename';\n";
-  print "eval {\n";
-  parse_file($filename);
-  print "\n};\n";
-  
-  print "### End of inlined library $module.\n" if $ShowFileBoundaries;
-  
-  return 1;
-}
-
-# %files_found - hash of filenames included so far
-use vars qw( %files_found );
-
-# $filename_or_nothing = find_file_once($module);
-sub find_file_once {
-  my $module_file = shift;
-  
-  return if ($module_file =~ /^[\.\_\d]+/); # ignore Perl version requirements
-  
-  $module_file =~ s#::#/#g;
-  $module_file .= '.pm';
-  
-  # If we've already included this file, we don't need to do it again.
-  return -1 if $files_found{ $module_file };
-  my $filename = search_path( $module_file );
-  $files_found{ $module_file } ++ if ( $filename );
-  return $filename;
-}
-
-# $filename = search_path($module);
+# $mod_path = search_path($mod_file);
 sub search_path {
-  my $module = shift;
+  my $mod_file = shift;
   
   my $dir;
-  foreach $dir (@INC) {
-    my $match = $dir . "/" . $module;
+  foreach $dir (@psuedo_INC) {
+    my $match = $dir . "/" . $mod_file;
     return $match if ( -e $match );
   }
   
-  return 0;
+  warn "Unable to find $mod_file\n";
+  return;
 }
 
 1;
@@ -245,64 +288,99 @@ From a command line,
 Or in a Perl script,
 
     use Devel::PreProcessor qw( Flags );
-    
+
     select(OUTPUTFH);
     Devel::PreProcessor::parse_file( $source_pathname );
 
 
 =head1 DESCRIPTION
 
-This package processes Perl source files and outputs a modified version acording to several user-setable option flags, as detailed below.
+This package processes Perl source files and outputs a modified version
+acording to several user-setable option flags, as detailed below.
 
-Each of the flag names listed below can be used as above, with a hyphen on the command line, or as one of the arguments in an import statement. Each of these flags are mapped to the scalar package variable of the same name.
+Each of the flag names listed below can be used as above, with a hyphen on
+the command line, or as one of the arguments in an import statement. Each
+of these flags are mapped to the scalar package variable of the same name.
 
 =over 4
 
 =item Includes
 
-If true, parse_file will attempt to replace C<use> and C<require> statements with inline declarations containg the source of the relevant library found in the current @INC. The resulting script should operate identically and no longer be dependant on external libraries (but see compatibility note below).
+If true, parse_file will attempt to replace C<require>, C<use> and C<no>
+statements with inline declarations containg the source of the relevant
+library found in the current @INC. The resulting script should operate
+identically and no longer be dependant on external libraries (but see
+compatibility note below).
 
-If a C<use libs ...> statement is encountered in the source, the library path arguments are evaluated and pushed onto @INC at run-time to enable inclusion of libraries from these paths.
+If the corresponding file can not be located, the statements are left
+unchanged in the source; numeric perl version requirements are handled
+the same way.
+
+If a C<use libs ...> statement is encountered in the source, the library
+path arguments are evaluated and pushed onto @INC at run-time to enable
+inclusion of libraries from these paths.
+
+Unless the file explicitly C<use>'s or C<require>'s AutoLoader,
+information after C<__END__> is not included in the resultant
+file. Information after C<__DATA__> is also discarded, except for the
+first, outermost source file.
 
 =item ShowFileBoundaries
 
-If true, comment lines will be inserted delimiting the start and end of each inlined file.
+If true, comment lines will be inserted delimiting the start and end of
+each inlined file.
 
 =item StripPods
 
-If true, parse_file will not include POD from the source files. All groups of lines resembling the following will be discarded:
+If true, parse_file will not include POD from the source files. All
+groups of lines resembling the following will be discarded:
 
-    =(pod|head1|head2)
-    ...
+    =(pod|head1|head2) 
+    ...  
     =cut
 
 =item StripBlankLines
 
-If true, parse_file will skip lines that are empty, or that contain only whitespace. 
+If true, parse_file will skip lines that are empty, or that contain
+only whitespace.
 
 =item StripComments
 
-If true, parse_file will not include full-line comments from the source files. Only lines that start with a pound sign are discarded; this behaviour might not match Perl's parsing rules in some cases, such as multiline strings.
+If true, parse_file will not include full-line comments from the
+source files. Only lines that start with a pound sign are discarded;
+this behaviour might not match Perl's parsing rules in some cases,
+such as multiline strings.
 
 =item Conditionals
 
-If true, parse_file will utilize a simple conditional inclusion scheme, as follows.
+If true, parse_file will utilize a simple conditional inclusion scheme,
+as follows.
 
     #__CONDITIONAL__ if expr
     ...		
     #__CONDITIONAL__ endif
 
-The provided Perl expression is evaluated, and unless it is true, everything up to the next endif declaration is replaced with empty lines. In order to allow the default behavour to be provided when running the raw files, comment out lines in non-default branches with the following:
+The provided Perl expression is evaluated, and unless it is true,
+everything up to the next endif declaration is replaced with empty
+lines. In order to allow the default behavour to be provided when
+running the raw files, comment out lines in non-default branches with
+the following:
 
     #__CONDITIONAL__ ...
 
-Empty lines are used  in place of skipped blocks to make line numbers come out evenly, but conditional use or require statements will throw the count off, as we don't pad by the size of the file that would have been in-lined.
+Empty lines are used  in place of skipped blocks to make line numbers
+come out evenly, but conditional use or require statements will throw
+the count off, as we don't pad by the size of the file that would have
+been in-lined.
 
-The conditional functionality can be combined with Perl's C<-s> switch, which allows you to set flags on the command line, such as:
+The conditional functionality can be combined with Perl's C<-s> switch,
+which allows you to set flags on the command line, such as:
 
     perl -s Devel/PreProcessor.pm -Conditionals -Switch filter.test
 
-You can use any name for your switch, and the matching scalar variable will be set true; the following code will only be used if you supply the argument as shown below.
+You can use any name for your switch, and the matching scalar variable
+will be set true; the following code will only be used if you supply
+the argument as shown below.
 
     #__CONDITIONAL__ if $Switch
     #__CONDITIONAL__   print "you hit the switch!\n";
@@ -316,9 +394,11 @@ To inline all used modules:
 
     perl -s Devel/PreProcessor.pm -Includes foo.pl > foo_complete.pl
 
-To count the lines of Perl source in a file, run the preprocessor from a shell with the following options
+To count the lines of Perl source in a file, run the preprocessor from
+a shell with the following options
 
-    perl -s Devel/PreProcessor.pm -StripComments -StripPods -StripBlankLines foo.pl | wc -l
+    perl -s Devel/PreProcessor.pm -StripComments -StripPods \
+    -StripBlankLines foo.pl | wc -l
 
 
 =head1 BUGS AND CAVEATS
@@ -327,27 +407,32 @@ To count the lines of Perl source in a file, run the preprocessor from a shell w
 
 =item Compatibility: Includes
 
-Libraries inlined with Includes may not be appropriate on another system, eg, if Config is inlined, the script may fail if run on a platform other than that on which it was built.
+Libraries inlined with Includes may not be appropriate on another system;
+for example, if Config is inlined, the script may fail if run on a platform
+other than that on which it was built. This problem can be minimized
+by adjusting the search path to not include modules in the version- or
+architecture-specific library trees, but you will then need to ensure
+that those modules are available on the execution platform.
 
-=item Bug: Use statements can't span lines
+=item Limitation: Pragmas
+
+While some pragmas are known to work, including use vars, problems may
+pop up with others. In particular, use strict and no strict pragmas are
+removed from the resulting source, because their scoping changes in a
+single-file context, usually with fatal results.
+
+=item Bug: Multi-line use statements not handled
 
 Should support newline in import blocks for multiline use statements.
 
-=item Limitation: No support for unimporting with "no" statements.
+=item Limitation: Module __DATA__ contents lost
 
-Should be mapped to unimport statements. Correct handling of pragmas to be determined.
+Few modules place anything other than POD in a __DATA__ section, much
+less ever try to read from it, so this hasn't been a priority to fix.
 
-=item Limitation: Autosplit files not included
+=item Limitation: binary files not included
 
-It should be possible to find and include autosplit file fragments.
-
-=item Limitation: XSUB files not included
-
-There's not much we can do about XSub/PLL files.
-
-=item Bug: __DATA__ lost
-
-We should really preserve the __DATA__ block from the original source file.
+There's not much we can do about XSub/SO/PLL files.
 
 =back
 
@@ -357,9 +442,10 @@ We should really preserve the __DATA__ block from the original source file.
 This package should run on any standard Perl 5 installation.
 
 You may retrieve this package from the below URL:
-  http://www.evoscript.com/dist/Devel-PreProcessor-1998.0919.tar.gz
+  http://www.evoscript.com/dist/
 
-To install this package, download and unpack the distribution archive, then:
+To install this package, download and unpack the distribution archive,
+then:
 
 =over 4
 
@@ -374,16 +460,18 @@ To install this package, download and unpack the distribution archive, then:
 
 =head1 STATUS AND SUPPORT
 
-This release of Devel::PreProcessor is intended for public review and feedback. 
-It has been tested in several environments and no major problems have been 
-discovered, but it should be considered "alpha" pending that feedback.
+This release of Devel::PreProcessor is intended primarily for public
+review and feedback, but is stable enough for production use. It has been
+tested in several environments and no major problems have been discovered,
+but it should be considered "beta" pending further feedback.
 
   Name            DSLI  Description
   --------------  ----  ---------------------------------------------
   Devel::
-  ::PreProcessor  adpf  Module inlining and other Perl source manipulations
+  ::PreProcessor  bdpf  Module inlining and other Perl source manipulations
 
-Further information and support for this module is available at E<lt>www.evoscript.comE<gt>.
+Further information and support for this module is available at
+E<lt>www.evoscript.comE<gt>.
 
 Please report bugs or other problems to E<lt>bugs@evoscript.comE<gt>.
 
@@ -392,13 +480,13 @@ Please report bugs or other problems to E<lt>bugs@evoscript.comE<gt>.
 
 Copyright 1998, 1999 Evolution Online Systems, Inc. E<lt>www.evolution.comE<gt>
 
-You may use this software for free under the terms of the Artistic License. 
+You may use this software for free under the terms of the Artistic License.
 
-Contributors: 
-M. Simon Cavalletto E<lt>simonm@evolution.comE<gt>, 
-with feature suggestions from Del Merritt E<lt>dmerritt@intranetics.comE<gt> 
-and Win32 debugging assistance from Randy Roy.
+Contributors: M. Simon Cavalletto E<lt>simonm@evolution.comE<gt> and
+Del Merritt E<lt>dmerritt@intranetics.comE<gt>, with Win32 debugging
+assistance from Randy Roy.
 
-Derived from filter.pl, as provided by ActiveWare E<lt>www.activestate.comE<gt> 
+Derived from filter.pl, as provided by ActiveWare
+E<lt>www.activestate.comE<gt>
 
-=cut
+=cut  
