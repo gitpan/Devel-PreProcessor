@@ -2,13 +2,15 @@
 
 ### Devel::PreProcessor - Module inlining and other Perl source manipulations
 
-### Copyright 1998 Evolution Online Systems, Inc.
+### Copyright 1998, 1999 Evolution Online Systems, Inc.
   # You may use this software for free under the terms of the Artistic License
 
 ### To Do:
   # - Create a real test suite.
 
 ### Change History
+  # 1999-02-04 For 5.005, add ".pm" to package name used in %INC. -Del
+  # 1998-11-01 Now using IO::File. Fixed POD =cut line for -Includes handling.
   # 1998-09-19 Cleaned up format of POD documentation.
   # 1998-09-08 Updated documentation to cover @INC overrides.
   # 1998-06-30 Added comment about handling "no" statements.
@@ -24,10 +26,12 @@
 
 package Devel::PreProcessor;
 
-$VERSION = 1998.09_19;
+$VERSION = 1999.0204;
 
 # Option flags, defaulting to off
 use vars qw( $Includes $Conditionals $StripComments $StripPods $ShowFileBoundaries $StripBlankLines );
+
+use IO::File;
 
 # Devel::PreProcessor->import( 'StripPods', 'Conditionals', ... );
 sub import {
@@ -55,7 +59,7 @@ sub import {
 
 # If we're being run directly, expand the first file on the command line.
 unless ( caller ) {
-  $Includes ||= $main::Includes;
+  $Includes ||= 1 || $main::Includes;
   $Conditionals ||= $main::Conditionals;
   $StripComments ||= $main::StripComments;
   $StripBlankLines ||= $main::StripBlankLines;
@@ -72,10 +76,10 @@ unless ( caller ) {
 sub parse_file {
   my $filename = shift;
   
-  open(FH, $filename);
+  my $fh = IO::File->new($filename);
   my $line_number;
   
-  LINE: while(<FH>) {
+  LINE: while(<$fh>) {
     $line_number ++;
     
     if ( $line_number < 2 and /^\#\!/ ){
@@ -85,12 +89,13 @@ sub parse_file {
       
     elsif ( $StripPods and /^=(pod|head[12])/i ){
       do { ++ $line_number; } 
-	  while ( <FH> !~ /^=cut/i );  # discard everything up to '=cut'
+	  while ( <$fh> !~ /^=cut/i );  # discard everything up to '=cut'
       next LINE;
     }    
     elsif ( /^=(pod|head[12])/i ){
-      do { print $_; ++ $line_number; $_ = <FH> } 
+      do { print $_; ++ $line_number; $_ = <$fh> } 
 	  while ( $_ !~ /^=cut/i );  	# include everything up to '=cut'
+      print $_;
       next LINE;
     }
     
@@ -116,7 +121,7 @@ sub parse_file {
       my $rc = eval "package main;\n" . $1;
       unless ( $rc and ! $@ ) {	    # if expr isn't true, skip to end
 	do { ++ $line_number; print "\n"; } 
-	    while ( <FH> !~ /^\s*\#__CONDITIONAL__ endif/i );
+	    while ( <$fh> !~ /^\s*\#__CONDITIONAL__ endif/i );
       }
     } elsif ( $Conditionals and /^\s*\#__CONDITIONAL__ endif/i){
       next LINE;			    # skip conditional end
@@ -149,9 +154,9 @@ sub do_use {
   
   do_include( $module, $filename ) unless ( $filename eq '-1' );
   
-  # Call import, but don't use the OOP notation for lowercase/pragmas.
+  # Call import, but don't use the OOP notation for pragmas.
   print $module, 
-  	($module =~ /\A[a-z]+\Z/ ? "::import('$module', " : "->import("), 
+  	( $module =~ /\A[a-z]+\Z/ ? "::import('$module', " : "->import(" ), 
 	( defined $imports ? $imports : '' ), ");\n";
   
   print "}\n";
@@ -173,14 +178,18 @@ sub do_include {
   my $module = shift;
   my $filename = shift;
   
-  print "### Start of inlined library $module.\n" . 
-	"  # Source file $filename.\n"          if $ShowFileBoundaries;
-
+  warn "  Including $filename\n";
+  
+  # For 5.005 compatibility, add .pm extension before setting up %INC 
+  $module .= '.pm' unless ( $module =~ /['"]/ || $module =~ /\.pm$/i ); 
+  
+  print "### Start of inlined library $module.\n" if $ShowFileBoundaries;
+  
   print "\$INC{'$module'} = '$filename';\n";
   print "eval {\n";
   parse_file($filename);
   print "\n};\n";
-
+  
   print "### End of inlined library $module.\n" if $ShowFileBoundaries;
   
   return 1;
@@ -381,7 +390,7 @@ Please report bugs or other problems to E<lt>bugs@evoscript.comE<gt>.
 
 =head1 AUTHORS AND COPYRIGHT
 
-Copyright 1998 Evolution Online Systems, Inc. E<lt>www.evolution.comE<gt>
+Copyright 1998, 1999 Evolution Online Systems, Inc. E<lt>www.evolution.comE<gt>
 
 You may use this software for free under the terms of the Artistic License. 
 
@@ -390,6 +399,6 @@ M. Simon Cavalletto E<lt>simonm@evolution.comE<gt>,
 with feature suggestions from Del Merritt E<lt>dmerritt@intranetics.comE<gt> 
 and Win32 debugging assistance from Randy Roy.
 
-Derived from filter.pl, as provided by ActiveWare <www.activestate.com>
+Derived from filter.pl, as provided by ActiveWare E<lt>www.activestate.comE<gt> 
 
 =cut
